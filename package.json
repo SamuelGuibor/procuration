@@ -1,0 +1,11 @@
+{
+  "name": "docx-converter",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "libreoffice-convert": "^1.6.0"
+  }
+}
