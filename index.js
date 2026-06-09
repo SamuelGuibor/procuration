@@ -122,9 +122,22 @@ app.post("/ai/chat", authCheck, async (req, res) => {
   try {
     const { messages, contextMessage, attachments, attachment } = req.body;
 
+    console.log("\n========================================");
+    console.log("[AI CHAT] Nova requisição recebida");
+    console.log("========================================");
+    console.log(`[AI CHAT] Total de mensagens: ${messages?.length ?? 0}`);
+    console.log(`[AI CHAT] Contexto do card: ${contextMessage ? "SIM (" + contextMessage.length + " chars)" : "NÃO"}`);
+    console.log(`[AI CHAT] Attachments (array): ${attachments ? attachments.length + " arquivo(s)" : "NENHUM"}`);
+    console.log(`[AI CHAT] Attachment (single): ${attachment ? "SIM" : "NÃO"}`);
+
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: "Mensagens não fornecidas" });
     }
+
+    // Log each message
+    messages.forEach((msg, i) => {
+      console.log(`[AI CHAT] Mensagem [${i}] role="${msg.role}" | ${msg.content?.length ?? 0} chars | preview: "${(msg.content || "").substring(0, 100)}..."`);
+    });
 
     const model = getModel();
 
@@ -143,26 +156,69 @@ app.post("/ai/chat", authCheck, async (req, res) => {
       parts.push({ text: lastMessage.content });
     }
 
-    // Process attachments
+    // Process attachments with detailed logging
+    let fileCount = 0;
+
     if (attachments && Array.isArray(attachments)) {
-      for (const att of attachments) {
+      console.log(`\n[AI CHAT] ---- Processando ${attachments.length} anexo(s) ----`);
+      for (let idx = 0; idx < attachments.length; idx++) {
+        const att = attachments[idx];
+        const fileName = att.name || "(sem nome)";
+        const declaredType = att.type || "(sem tipo)";
+
         if (att.fileUri && att.mimeType) {
+          console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → fileUri (upload Gemini)`);
+          console.log(`  - fileUri: ${att.fileUri}`);
+          console.log(`  - mimeType: ${att.mimeType}`);
           parts.push({ fileData: { fileUri: att.fileUri, mimeType: att.mimeType } });
+          fileCount++;
         } else if (att.content) {
           const mimeType = resolveMimeType(att.name ?? "", att.type ?? "");
+          const sizeBytes = att.content.length;
+          const sizeKB = (sizeBytes * 0.75 / 1024).toFixed(1); // base64 → real size approx
+
           if (mimeType) {
+            console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → inlineData`);
+            console.log(`  - tipo declarado: ${declaredType}`);
+            console.log(`  - mimeType resolvido: ${mimeType}`);
+            console.log(`  - tamanho base64: ${sizeBytes} chars (~${sizeKB} KB real)`);
+            console.log(`  - primeiros 100 chars do content: "${att.content.substring(0, 100)}..."`);
             parts.push({ inlineData: { mimeType, data: att.content } });
+            fileCount++;
           } else {
+            console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → REJEITADO (formato não suportado)`);
+            console.log(`  - tipo declarado: ${declaredType}`);
+            console.log(`  - tamanho base64: ${sizeBytes} chars`);
             parts.push({ text: `[Arquivo "${att.name}" não pôde ser analisado — formato não suportado]` });
           }
+        } else {
+          console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → IGNORADO (sem content e sem fileUri)`);
         }
       }
     } else if (attachment?.content && attachment?.type) {
       const mimeType = resolveMimeType(attachment.name ?? "", attachment.type);
+      const sizeBytes = attachment.content.length;
+      const sizeKB = (sizeBytes * 0.75 / 1024).toFixed(1);
+
+      console.log(`\n[AI CHAT] ---- Processando 1 anexo (singular) ----`);
+      console.log(`[AI CHAT] Anexo "${attachment.name || "(sem nome)"}" | tipo: ${attachment.type}`);
+      console.log(`  - mimeType resolvido: ${mimeType || "NÃO SUPORTADO"}`);
+      console.log(`  - tamanho base64: ${sizeBytes} chars (~${sizeKB} KB real)`);
+
       if (mimeType) {
         parts.push({ inlineData: { mimeType, data: attachment.content } });
+        fileCount++;
       }
     }
+
+    console.log(`\n[AI CHAT] ---- Resumo final ----`);
+    console.log(`[AI CHAT] Total de parts enviadas ao Gemini: ${parts.length}`);
+    console.log(`[AI CHAT] - Textos: ${parts.filter(p => p.text).length}`);
+    console.log(`[AI CHAT] - Arquivos (inlineData): ${parts.filter(p => p.inlineData).length}`);
+    console.log(`[AI CHAT] - Arquivos (fileData/URI): ${parts.filter(p => p.fileData).length}`);
+    console.log(`[AI CHAT] Arquivos aceitos: ${fileCount}`);
+    console.log(`[AI CHAT] Histórico: ${history.length} mensagens anteriores`);
+    console.log("[AI CHAT] Enviando para Gemini...\n");
 
     const result = await sendStreamWithRetry(chat, parts);
 
@@ -176,13 +232,16 @@ app.post("/ai/chat", authCheck, async (req, res) => {
 
     const finalResponse = await result.response;
     const usage = finalResponse.usageMetadata;
-    console.log(
-      `[AI] Tokens — Prompt: ${usage?.promptTokenCount ?? "?"} | Response: ${usage?.candidatesTokenCount ?? "?"} | Total: ${usage?.totalTokenCount ?? "?"}`
-    );
+    console.log("\n[AI CHAT] ---- Resposta do Gemini ----");
+    console.log(`[AI CHAT] Tokens do Prompt: ${usage?.promptTokenCount ?? "?"}`);
+    console.log(`[AI CHAT] Tokens da Resposta: ${usage?.candidatesTokenCount ?? "?"}`);
+    console.log(`[AI CHAT] Tokens Total: ${usage?.totalTokenCount ?? "?"}`);
+    console.log(`[AI CHAT] Finish reason: ${finalResponse.candidates?.[0]?.finishReason ?? "?"}`);
+    console.log("========================================\n");
 
     res.end();
   } catch (error) {
-    console.error("[AI] Chat error:", error);
+    console.error("\n[AI CHAT] ❌ ERRO:", error);
     const status = error?.status || 500;
     let message = "Erro ao processar mensagem com IA.";
     if (status === 503) message = "Servidor sobrecarregado. Tente novamente em 1 minuto.";
