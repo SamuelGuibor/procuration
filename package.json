@@ -6,6 +6,7 @@
   },
   "dependencies": {
     "express": "^5.2.1",
-    "libreoffice-convert": "^1.6.0"
+    "libreoffice-convert": "^1.6.0",
+    "@google/generative-ai": "^0.24.1"
   }
 }
