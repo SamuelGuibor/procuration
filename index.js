@@ -91,7 +91,7 @@ function resolveMimeType(filename, declaredType) {
 function getModel() {
   const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
   return genAI.getGenerativeModel({
-    model: "gemini-3.5-flash",
+    model: "gemini-2.5-pro",
     systemInstruction: SYSTEM_INSTRUCTION,
   });
 }
@@ -286,7 +286,7 @@ app.post("/ai/extract-fields", authCheck, async (req, res) => {
     }
 
     const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro" });
 
     const prompt = `A partir do texto abaixo (respostas numeradas de uma análise de documentos de um cliente), extraia os valores para TODOS os campos listados.
 
@@ -344,7 +344,7 @@ MAPEAMENTO — como encontrar cada campo no texto:
 - tem_cat: campo <<tem_cat>> ou pergunta 26
 - pericia_adm: se mencionado
 - disponibilidade_pericia: campo <<disponibilidade_pericia>> ou pergunta 12
-- outros_afastamentos: pergunta 28
+- outros_afastamentos: pergunta 29 em conjunto com a 28
 
 TEXTO DA CONVERSA/ANÁLISE:
 ${content}`;
