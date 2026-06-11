@@ -1,11 +1,35 @@
+require("dotenv").config();
+
 const express = require("express");
 const libre = require("libreoffice-convert");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-
+const Anthropic = require("@anthropic-ai/sdk");
+const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const API_KEY = process.env.CONVERTER_API_KEY || "";
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || "";
+
+// Aceita CLAUDE_API_KEY (nome custom usado neste projeto) ou ANTHROPIC_API_KEY
+// (nome padrão lido pelo SDK). Damos prioridade ao Anthropic padrão.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+
+console.log("Configurações:", ANTHROPIC_API_KEY);
+
+const CLAUDE_MODEL = "claude-haiku-4-5";
+
+// Modelos que suportam adaptive thinking. Haiku 4.5 NÃO suporta.
+const ADAPTIVE_THINKING_MODELS = new Set([
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-opus-4-6",
+  "claude-sonnet-4-6",
+]);
+
+function supportsAdaptiveThinking(model) {
+  return ADAPTIVE_THINKING_MODELS.has(model);
+}
+
+// Cliente Anthropic — explícito para tolerar variável de ambiente custom.
+const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 // Parsers
 app.use("/convert", express.raw({ type: "application/octet-stream", limit: "20mb" }));
@@ -39,7 +63,7 @@ app.post("/convert", authCheck, (req, res) => {
 });
 
 // =============================================
-// AI — Gemini Chat (streaming)
+// AI — Claude Chat (streaming)
 // =============================================
 
 const SYSTEM_INSTRUCTION = `
@@ -56,62 +80,123 @@ AFASTAMENTOS (perguntas 24, 25, 28):
 Quando houver multiplos beneficios no arquivo "declaracao-de-beneficio", use o beneficio cujo ANO DE INICIO seja igual ou mais proximo (posterior) ao ANO da data do acidente para as perguntas 24 e 25. Os demais vao para a pergunta 28.
 Formato pergunta 25: "X meses e X dias. dd/mm/aaaa - dd/mm/aaaa"
 Formato pergunta 28: "TIPO - NUMERO - dd/mm/aaaa - dd/mm/aaaa" (um por linha)
-`;
+`.trim();
 
-const SUPPORTED_MIME_TYPES = new Set([
-  "application/pdf",
-  "image/png", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/heif",
-  "audio/wav", "audio/mp3", "audio/mpeg", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac",
-  "video/mp4", "video/mpeg", "video/mov", "video/avi", "video/x-flv", "video/mpg", "video/webm", "video/wmv", "video/3gpp",
-  "text/plain", "text/html", "text/css", "text/javascript", "text/x-typescript",
-  "text/csv", "text/markdown", "text/x-python", "text/x-java", "text/xml", "text/rtf",
+// Tipos MIME que o Claude aceita nativamente como content block.
+// - Imagens: image block (jpeg/png/gif/webp)
+// - PDFs: document block
+const IMAGE_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
 ]);
 
 const EXT_TO_MIME = {
   pdf: "application/pdf",
-  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-  gif: "image/gif", webp: "image/webp", heic: "image/heic", heif: "image/heif",
-  txt: "text/plain", csv: "text/csv", html: "text/html", htm: "text/html",
-  md: "text/markdown", markdown: "text/markdown",
-  xml: "text/xml", rtf: "text/rtf",
-  js: "text/javascript", ts: "text/x-typescript",
-  py: "text/x-python", java: "text/x-java",
-  mp3: "audio/mp3", wav: "audio/wav", ogg: "audio/ogg",
-  aac: "audio/aac", flac: "audio/flac", aiff: "audio/aiff",
-  mp4: "video/mp4", mov: "video/mov", avi: "video/avi",
-  webm: "video/webm", wmv: "video/wmv",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  txt: "text/plain",
+  csv: "text/csv",
+  html: "text/html",
+  htm: "text/html",
+  md: "text/markdown",
+  markdown: "text/markdown",
+  xml: "text/xml",
+  rtf: "text/rtf",
+  js: "text/javascript",
+  ts: "text/x-typescript",
+  py: "text/x-python",
+  java: "text/x-java",
 };
 
 function resolveMimeType(filename, declaredType) {
-  if (SUPPORTED_MIME_TYPES.has(declaredType)) return declaredType;
+  if (declaredType && (IMAGE_MIME_TYPES.has(declaredType) || declaredType === "application/pdf" || declaredType.startsWith("text/"))) {
+    return declaredType;
+  }
   const ext = (filename || "").split(".").pop()?.toLowerCase() ?? "";
   return EXT_TO_MIME[ext] ?? null;
 }
 
-function getModel() {
-  const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
-  return genAI.getGenerativeModel({
-    model: "gemini-2.5-flash",
-    systemInstruction: SYSTEM_INSTRUCTION,
-  });
+// Tenta decodificar base64 para string (para arquivos de texto).
+function tryDecodeTextBase64(base64) {
+  try {
+    return Buffer.from(base64, "base64").toString("utf-8");
+  } catch {
+    return null;
+  }
+}
+
+// Converte um anexo (do payload) em um content block do Claude.
+// Retorna null se o formato não é suportado.
+function buildContentBlockFromAttachment(att) {
+  if (!att) return null;
+  const fileName = att.name || "(sem nome)";
+  const mimeType = resolveMimeType(fileName, att.type || "");
+
+  if (!mimeType) return null;
+
+  // PDFs → document block (base64)
+  if (mimeType === "application/pdf") {
+    if (!att.content) return null;
+    return {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "application/pdf",
+        data: att.content,
+      },
+      title: fileName,
+    };
+  }
+
+  // Imagens suportadas → image block (base64)
+  if (IMAGE_MIME_TYPES.has(mimeType)) {
+    if (!att.content) return null;
+    return {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: mimeType,
+        data: att.content,
+      },
+    };
+  }
+
+  // Texto (txt, csv, md, html, xml, js, ts, py, java...) → text block inline.
+  if (mimeType.startsWith("text/")) {
+    if (!att.content) return null;
+    const decoded = tryDecodeTextBase64(att.content);
+    if (!decoded) return null;
+    return {
+      type: "text",
+      text: `[Arquivo "${fileName}"]\n${decoded}`,
+    };
+  }
+
+  return null;
 }
 
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY = 2000;
 
-async function sendStreamWithRetry(chat, parts, attempt = 1) {
+function isRetryableStatus(status) {
+  return status === 429 || status === 503 || status === 529;
+}
+
+async function withRetry(fn, attempt = 1) {
   try {
-    return await chat.sendMessageStream(parts);
+    return await fn();
   } catch (error) {
     const status = error?.status;
-    const isRetryable = status === 503 || status === 429;
-
-    if (!isRetryable || attempt > MAX_RETRIES) throw error;
-
+    if (!isRetryableStatus(status) || attempt > MAX_RETRIES) throw error;
     const delay = RETRY_BASE_DELAY * Math.pow(2, attempt - 1);
-    console.log(`[AI] Retry ${attempt}/${MAX_RETRIES} (${status}), waiting ${delay}ms...`);
+    console.log(`[AI] Retry ${attempt}/${MAX_RETRIES} (status=${status}), aguardando ${delay}ms...`);
     await new Promise((r) => setTimeout(r, delay));
-    return sendStreamWithRetry(chat, parts, attempt + 1);
+    return withRetry(fn, attempt + 1);
   }
 }
 
@@ -122,6 +207,7 @@ app.post("/ai/chat", authCheck, async (req, res) => {
     console.log("\n========================================");
     console.log("[AI CHAT] Nova requisição recebida");
     console.log("========================================");
+    console.log(`[AI CHAT] Modelo: ${CLAUDE_MODEL}`);
     console.log(`[AI CHAT] Total de mensagens: ${messages?.length ?? 0}`);
     console.log(`[AI CHAT] Contexto do card: ${contextMessage ? "SIM (" + contextMessage.length + " chars)" : "NÃO"}`);
     console.log(`[AI CHAT] Attachments (array): ${attachments ? attachments.length + " arquivo(s)" : "NENHUM"}`);
@@ -131,109 +217,147 @@ app.post("/ai/chat", authCheck, async (req, res) => {
       return res.status(400).json({ error: "Mensagens não fornecidas" });
     }
 
-    // Log each message
     messages.forEach((msg, i) => {
       console.log(`[AI CHAT] Mensagem [${i}] role="${msg.role}" | ${msg.content?.length ?? 0} chars | preview: "${(msg.content || "").substring(0, 100)}..."`);
     });
 
-    const model = getModel();
-
+    // ---- Monta histórico no formato Anthropic (user|assistant) ----
     const history = messages.slice(0, -1).map((msg) => ({
-      role: msg.role === "assistant" ? "model" : "user",
-      parts: [{ text: msg.content }],
+      role: msg.role === "assistant" ? "assistant" : "user",
+      content: msg.content,
     }));
 
     const lastMessage = messages[messages.length - 1];
-    const chat = model.startChat({ history });
-    const parts = [];
+    const lastText = (lastMessage?.content ?? "").trim();
 
-    if (contextMessage && history.length === 0) {
-      parts.push({ text: `${contextMessage}\n\n${lastMessage.content}` });
-    } else {
-      parts.push({ text: lastMessage.content });
+    // Última mensagem do usuário pode conter texto + anexos (multimodal).
+    const lastContent = [];
+
+    // Se for a primeira interação e tiver context do card, antecipa.
+    const userText =
+      contextMessage && history.length === 0
+        ? `${contextMessage}\n\n${lastText}`
+        : lastText;
+
+    if (userText) {
+      lastContent.push({ type: "text", text: userText });
     }
 
-    // Process attachments with detailed logging
-    let fileCount = 0;
+    // ---- Processa anexos ----
+    let acceptedFiles = 0;
+    let rejectedFiles = 0;
 
-    if (attachments && Array.isArray(attachments)) {
-      console.log(`\n[AI CHAT] ---- Processando ${attachments.length} anexo(s) ----`);
-      for (let idx = 0; idx < attachments.length; idx++) {
-        const att = attachments[idx];
-        const fileName = att.name || "(sem nome)";
-        const declaredType = att.type || "(sem tipo)";
+    const attachmentList = Array.isArray(attachments)
+      ? attachments
+      : attachment
+      ? [attachment]
+      : [];
 
-        if (att.fileUri && att.mimeType) {
-          console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → fileUri (upload Gemini)`);
-          console.log(`  - fileUri: ${att.fileUri}`);
-          console.log(`  - mimeType: ${att.mimeType}`);
-          parts.push({ fileData: { fileUri: att.fileUri, mimeType: att.mimeType } });
-          fileCount++;
-        } else if (att.content) {
-          const mimeType = resolveMimeType(att.name ?? "", att.type ?? "");
-          const sizeBytes = att.content.length;
-          const sizeKB = (sizeBytes * 0.75 / 1024).toFixed(1); // base64 → real size approx
+    if (attachmentList.length > 0) {
+      console.log(`\n[AI CHAT] ---- Processando ${attachmentList.length} anexo(s) ----`);
+      for (let idx = 0; idx < attachmentList.length; idx++) {
+        const att = attachmentList[idx];
+        const fileName = att?.name || "(sem nome)";
+        const block = buildContentBlockFromAttachment(att);
 
-          if (mimeType) {
-            console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → inlineData`);
-            console.log(`  - tipo declarado: ${declaredType}`);
-            console.log(`  - mimeType resolvido: ${mimeType}`);
-            console.log(`  - tamanho base64: ${sizeBytes} chars (~${sizeKB} KB real)`);
-            console.log(`  - primeiros 100 chars do content: "${att.content.substring(0, 100)}..."`);
-            parts.push({ inlineData: { mimeType, data: att.content } });
-            fileCount++;
-          } else {
-            console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → REJEITADO (formato não suportado)`);
-            console.log(`  - tipo declarado: ${declaredType}`);
-            console.log(`  - tamanho base64: ${sizeBytes} chars`);
-            parts.push({ text: `[Arquivo "${att.name}" não pôde ser analisado — formato não suportado]` });
-          }
+        if (block) {
+          console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → ${block.type} (${block.source?.media_type ?? "text"})`);
+          lastContent.push(block);
+          acceptedFiles++;
         } else {
-          console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → IGNORADO (sem content e sem fileUri)`);
+          console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → REJEITADO (formato não suportado pelo Claude)`);
+          lastContent.push({
+            type: "text",
+            text: `[Arquivo "${fileName}" não pôde ser analisado — formato não suportado]`,
+          });
+          rejectedFiles++;
         }
       }
-    } else if (attachment?.content && attachment?.type) {
-      const mimeType = resolveMimeType(attachment.name ?? "", attachment.type);
-      const sizeBytes = attachment.content.length;
-      const sizeKB = (sizeBytes * 0.75 / 1024).toFixed(1);
-
-      console.log(`\n[AI CHAT] ---- Processando 1 anexo (singular) ----`);
-      console.log(`[AI CHAT] Anexo "${attachment.name || "(sem nome)"}" | tipo: ${attachment.type}`);
-      console.log(`  - mimeType resolvido: ${mimeType || "NÃO SUPORTADO"}`);
-      console.log(`  - tamanho base64: ${sizeBytes} chars (~${sizeKB} KB real)`);
-
-      if (mimeType) {
-        parts.push({ inlineData: { mimeType, data: attachment.content } });
-        fileCount++;
-      }
     }
 
+    // Garante pelo menos um content block.
+    if (lastContent.length === 0) {
+      lastContent.push({ type: "text", text: "" });
+    }
+
+    const fullMessages = [
+      ...history,
+      { role: "user", content: lastContent },
+    ];
+
     console.log(`\n[AI CHAT] ---- Resumo final ----`);
-    console.log(`[AI CHAT] Total de parts enviadas ao Gemini: ${parts.length}`);
-    console.log(`[AI CHAT] - Textos: ${parts.filter(p => p.text).length}`);
-    console.log(`[AI CHAT] - Arquivos (inlineData): ${parts.filter(p => p.inlineData).length}`);
-    console.log(`[AI CHAT] - Arquivos (fileData/URI): ${parts.filter(p => p.fileData).length}`);
-    console.log(`[AI CHAT] Arquivos aceitos: ${fileCount}`);
+    console.log(`[AI CHAT] Total de blocks na última mensagem: ${lastContent.length}`);
+    console.log(`[AI CHAT]  - Textos: ${lastContent.filter((b) => b.type === "text").length}`);
+    console.log(`[AI CHAT]  - Documentos (PDF): ${lastContent.filter((b) => b.type === "document").length}`);
+    console.log(`[AI CHAT]  - Imagens: ${lastContent.filter((b) => b.type === "image").length}`);
+    console.log(`[AI CHAT] Arquivos aceitos: ${acceptedFiles} | rejeitados: ${rejectedFiles}`);
     console.log(`[AI CHAT] Histórico: ${history.length} mensagens anteriores`);
-    console.log("[AI CHAT] Enviando para Gemini...\n");
+    console.log(`[AI CHAT] Enviando para Claude (${CLAUDE_MODEL})...\n`);
 
-    const result = await sendStreamWithRetry(chat, parts);
-
+    // ---- Headers para streaming ----
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader("Transfer-Encoding", "chunked");
 
-    for await (const chunk of result.stream) {
-      const text = chunk.text();
-      if (text) res.write(text);
+   // ---- Prompt caching ----
+    // 1) Cacheia o SYSTEM_INSTRUCTION (estável entre requisições).
+    // 2) Marca o ÚLTIMO bloco "pesado" da última mensagem (PDF ou imagem)
+    //    com cache_control — assim o Claude cacheia tudo até ele, e o
+    //    próximo turn paga ~10% do input ao invés de 100%.
+    const systemWithCache = [
+      { type: "text", text: SYSTEM_INSTRUCTION, cache_control: { type: "ephemeral" } },
+    ];
+
+    // Acha o índice do último bloco cacheável (document ou image)
+    // na última mensagem.
+    let lastHeavyIdx = -1;
+    for (let i = lastContent.length - 1; i >= 0; i--) {
+      const t = lastContent[i].type;
+      if (t === "document" || t === "image") {
+        lastHeavyIdx = i;
+        break;
+      }
+    }
+    if (lastHeavyIdx >= 0) {
+      lastContent[lastHeavyIdx] = {
+        ...lastContent[lastHeavyIdx],
+        cache_control: { type: "ephemeral" },
+      };
     }
 
-    const finalResponse = await result.response;
-    const usage = finalResponse.usageMetadata;
-    console.log("\n[AI CHAT] ---- Resposta do Gemini ----");
-    console.log(`[AI CHAT] Tokens do Prompt: ${usage?.promptTokenCount ?? "?"}`);
-    console.log(`[AI CHAT] Tokens da Resposta: ${usage?.candidatesTokenCount ?? "?"}`);
-    console.log(`[AI CHAT] Tokens Total: ${usage?.totalTokenCount ?? "?"}`);
-    console.log(`[AI CHAT] Finish reason: ${finalResponse.candidates?.[0]?.finishReason ?? "?"}`);
+    // ---- Monta request, ativando thinking só onde for suportado ----
+    const requestOptions = {
+      model: CLAUDE_MODEL,
+      max_tokens: 16000,
+      system: systemWithCache,
+      messages: fullMessages,
+    };
+    if (supportsAdaptiveThinking(CLAUDE_MODEL)) {
+      requestOptions.thinking = { type: "adaptive" };
+    }
+
+    const stream = await withRetry(() => anthropic.messages.stream(requestOptions));
+
+    // Escuta deltas de texto e repassa.
+    stream.on("text", (delta) => {
+      if (delta) res.write(delta);
+    });
+
+    const finalMessage = await stream.finalMessage();
+
+    const usage = finalMessage.usage || {};
+    const inputUncached = usage.input_tokens ?? 0;
+    const cacheRead = usage.cache_read_input_tokens ?? 0;
+    const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+    const totalInput = inputUncached + cacheRead + cacheWrite;
+    const cacheHitPct = totalInput > 0 ? ((cacheRead / totalInput) * 100).toFixed(1) : "0.0";
+
+    console.log("\n[AI CHAT] ---- Resposta do Claude ----");
+    console.log(`[AI CHAT] Tokens de input (sem cache): ${inputUncached}`);
+    console.log(`[AI CHAT] Tokens de output: ${usage.output_tokens ?? "?"}`);
+    if (cacheRead) console.log(`[AI CHAT] Cache READ (10% custo): ${cacheRead} tokens`);
+    if (cacheWrite) console.log(`[AI CHAT] Cache WRITE (1.25× custo): ${cacheWrite} tokens`);
+    console.log(`[AI CHAT] Total input: ${totalInput} | Cache hit: ${cacheHitPct}%`);
+    console.log(`[AI CHAT] Stop reason: ${finalMessage.stop_reason ?? "?"}`);
     console.log("========================================\n");
 
     res.end();
@@ -241,11 +365,21 @@ app.post("/ai/chat", authCheck, async (req, res) => {
     console.error("\n[AI CHAT] ❌ ERRO:", error);
     const status = error?.status || 500;
     let message = "Erro ao processar mensagem com IA.";
-    if (status === 503) message = "Servidor sobrecarregado. Tente novamente em 1 minuto.";
-    else if (status === 429) message = "Limite de requisições excedido. Aguarde alguns minutos.";
+    if (status === 529 || status === 503) {
+      message = "Servidor sobrecarregado. Tente novamente em 1 minuto.";
+    } else if (status === 429) {
+      message = "Limite de requisições excedido. Aguarde alguns minutos.";
+    } else if (status === 401) {
+      message = "Chave da API do Claude inválida ou ausente.";
+    }
 
     if (!res.headersSent) {
       res.status(status).json({ error: message });
+    } else {
+      try {
+        res.write(`\n[ERRO]: ${message}`);
+        res.end();
+      } catch { /* stream já encerrado */ }
     }
   }
 });
@@ -277,6 +411,22 @@ const EXTRACTABLE_FIELDS = [
   "outros_afastamentos",
 ];
 
+// Schema JSON estrito para structured output do Claude.
+function buildExtractSchema() {
+  const properties = {};
+  for (const field of EXTRACTABLE_FIELDS) {
+    properties[field] = { type: "string" };
+  }
+  return {
+    type: "object",
+    properties,
+    required: EXTRACTABLE_FIELDS,
+    additionalProperties: false,
+  };
+}
+
+const EXTRACT_SCHEMA = buildExtractSchema();
+
 app.post("/ai/extract-fields", authCheck, async (req, res) => {
   try {
     const { content } = req.body;
@@ -284,9 +434,6 @@ app.post("/ai/extract-fields", authCheck, async (req, res) => {
     if (!content) {
       return res.status(400).json({ error: "Conteúdo não fornecido" });
     }
-
-    const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     const prompt = `A partir do texto abaixo (respostas numeradas de uma análise de documentos de um cliente), extraia os valores para TODOS os campos listados.
 
@@ -349,10 +496,29 @@ MAPEAMENTO — como encontrar cada campo no texto:
 TEXTO DA CONVERSA/ANÁLISE:
 ${content}`;
 
-    const result = await model.generateContent(prompt);
-    const raw = result.response.text().trim();
-    const json = raw.replace(/^```json?\s*/i, "").replace(/\s*```$/i, "");
-    const fields = JSON.parse(json);
+    // Usa structured outputs do Claude — garante JSON válido aderente ao schema.
+    const response = await withRetry(() =>
+      anthropic.messages.create({
+        model: CLAUDE_MODEL,
+        max_tokens: 8000,
+        system: SYSTEM_INSTRUCTION,
+        output_config: {
+          format: {
+            type: "json_schema",
+            schema: EXTRACT_SCHEMA,
+          },
+        },
+        messages: [{ role: "user", content: prompt }],
+      })
+    );
+
+    // Extrai o texto da resposta (estará no formato JSON pelo schema).
+    let rawText = "";
+    for (const block of response.content || []) {
+      if (block.type === "text" && block.text) rawText += block.text;
+    }
+    const cleaned = rawText.trim().replace(/^```json?\s*/i, "").replace(/\s*```$/i, "");
+    const fields = JSON.parse(cleaned);
 
     res.json(fields);
   } catch (error) {
@@ -365,9 +531,16 @@ ${content}`;
 // Health check
 // =============================================
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
+  res.json({ status: "ok", model: CLAUDE_MODEL });
 });
 
-app.listen(PORT, () => {
-  console.log(`docx-converter running on port ${PORT}`);
+app.listen(PORT,  () => {
+  console.log(`docx-converter rodando na porta ${PORT}`);
+  console.log(`AI provider: Anthropic Claude (${CLAUDE_MODEL})`);
+  if (!ANTHROPIC_API_KEY) {
+    console.warn("⚠️  ANTHROPIC_API_KEY não configurada — chamadas /ai/* irão falhar.");
+  }
 });
+
+app.use(cors());
+
