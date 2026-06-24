@@ -32,6 +32,7 @@ function supportsAdaptiveThinking(model) {
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 // Parsers
+app.use(cors());
 app.use("/convert", express.raw({ type: "application/octet-stream", limit: "20mb" }));
 app.use("/ai", express.json({ limit: "50mb" }));
 
@@ -541,6 +542,4 @@ app.listen(PORT,  () => {
     console.warn("⚠️  ANTHROPIC_API_KEY não configurada — chamadas /ai/* irão falhar.");
   }
 });
-
-app.use(cors());
 
