@@ -81,6 +81,64 @@ AFASTAMENTOS (perguntas 24, 25, 28):
 Quando houver multiplos beneficios no arquivo "declaracao-de-beneficio", use o beneficio cujo ANO DE INICIO seja igual ou mais proximo (posterior) ao ANO da data do acidente para as perguntas 24 e 25. Os demais vao para a pergunta 28.
 Formato pergunta 25: "X meses e X dias. dd/mm/aaaa - dd/mm/aaaa"
 Formato pergunta 28: "TIPO - NUMERO - dd/mm/aaaa - dd/mm/aaaa" (um por linha)
+
+========================================
+FORMATO DE SAIDA (OBRIGATORIO ao gerar o roteiro)
+========================================
+Quando o usuario pedir o roteiro / a analise dos documentos, responda SEMPRE
+com uma linha por campo, no formato EXATO abaixo (o sistema le essas tags
+automaticamente para preencher o documento):
+
+    N - <<tag>>: valor
+
+Regras do formato:
+- Use EXATAMENTE as tags abaixo, entre << >>. Nunca traduza, renomeie ou invente tags.
+- Uma tag por linha. Sempre inclua a tag, mesmo que o valor seja "Nao apurado".
+- Nao use markdown (nada de **negrito**, listas com *, tabelas). Apenas "N - <<tag>>: valor".
+- Para campos com varios itens (quais_sequelas, outros_afastamentos), coloque
+  cada item em uma nova linha logo abaixo da tag.
+- Endereco (pergunta 8): NAO junte tudo numa tag so. Separe em <<rua>>, <<numero>>,
+  <<bairro>>, <<cidade>>, <<estado>>, <<cep>>.
+
+Tags e a pergunta correspondente:
+1   - <<name>>: nome completo
+2   - <<profissao>>: profissao atual
+3   - <<profissao_epoca>>: profissao na epoca do acidente
+4   - <<telefone>>: telefone principal
+5   - <<telefone_secundario>>: telefone secundario
+5   - <<forma_contato>>: forma de contato preferida
+6   - <<redes_sociais>>: redes sociais
+7   - <<rg>>: RG
+8   - <<rua>>: logradouro
+8   - <<numero>>: numero
+8   - <<bairro>>: bairro
+8   - <<cidade>>: cidade
+8   - <<estado>>: estado/UF
+8   - <<cep>>: CEP
+9   - <<cpf>>: CPF
+10  - <<senha_inss>>: senha do INSS / gov.br
+11  - <<estado_civil>>: estado civil
+11.1- <<status>>: status
+12  - <<disponibilidade_pericia>>: disponibilidade para pericia
+13  - <<data_acidente>>: data do acidente
+14  - <<como_acidente>>: como ocorreu o acidente
+16  - <<ficou_internado>>: ficou internado?
+17  - <<fez_cirurgia>>: fez cirurgia?
+18  - <<lesoes>>: lesoes
+19  - <<tem_sequelas>>: tem sequelas?
+20  - <<quais_sequelas>>: quais sequelas (uma por linha)
+21  - <<envolveu_veiculo>>: envolveu veiculo?
+22  - <<tem_bo>>: tem boletim de ocorrencia?
+23  - <<voltou_trabalhar>>: voltou a trabalhar?
+24  - <<ficou_afastado>>: ficou afastado?
+25  - <<tempo_afastamento>>: tempo de afastamento (X meses e X dias. dd/mm/aaaa - dd/mm/aaaa)
+26  - <<tem_cat>>: tem CAT?
+27  - <<descricao_fatos>>: descricao dos fatos
+28  - <<outros_afastamentos>>: outros afastamentos (um por linha: TIPO - NUMERO - dd/mm/aaaa - dd/mm/aaaa)
+
+Campos opcionais (inclua se aparecerem nos documentos):
+    <<email>>, <<nome_mae>>, <<data_nascimento>>, <<nacionalidade>>,
+    <<hospital>>, <<pericia_adm>>, <<service>>
 `.trim();
 
 // Tipos MIME que o Claude aceita nativamente como content block.
