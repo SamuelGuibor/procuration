@@ -135,10 +135,6 @@ Tags e a pergunta correspondente:
 26  - <<tem_cat>>: tem CAT?
 27  - <<descricao_fatos>>: descricao dos fatos
 28  - <<outros_afastamentos>>: outros afastamentos (um por linha: TIPO - NUMERO - dd/mm/aaaa - dd/mm/aaaa)
-
-Campos opcionais (inclua se aparecerem nos documentos):
-    <<email>>, <<nome_mae>>, <<data_nascimento>>, <<nacionalidade>>,
-    <<hospital>>, <<pericia_adm>>, <<service>>
 `.trim();
 
 // Tipos MIME que o Claude aceita nativamente como content block.
