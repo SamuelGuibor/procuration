@@ -47,20 +47,28 @@ function authCheck(req, res, next) {
 // =============================================
 // DOCX → PDF conversion
 // =============================================
+// Fila serial: garante que apenas UMA conversão do LibreOffice rode por vez.
+// Dois processos `soffice` simultâneos colidem no perfil/threads e disparam
+// "osl::Thread::create failed" em containers (Railway).
+let converting = Promise.resolve();
+
 app.post("/convert", authCheck, (req, res) => {
   if (!req.body || req.body.length === 0) {
     return res.status(400).json({ error: "No file provided" });
   }
 
-  libre.convert(req.body, "pdf", undefined, (err, result) => {
-    if (err) {
-      console.error("Conversion error:", err);
-      return res.status(500).json({ error: "Conversion failed" });
-    }
-
-    res.set("Content-Type", "application/pdf");
-    res.send(result);
-  });
+  converting = converting.then(() => new Promise((resolve) => {
+    libre.convert(req.body, "pdf", undefined, (err, result) => {
+      if (err) {
+        console.error("Conversion error:", err);
+        res.status(500).json({ error: "Conversion failed" });
+      } else {
+        res.set("Content-Type", "application/pdf");
+        res.send(result);
+      }
+      resolve();
+    });
+  }));
 });
 
 // =============================================
@@ -76,6 +84,20 @@ REGRAS:
 - Quando nao encontrar uma informacao, retorne exatamente "Nao apurado" (nunca "undefined", nunca vazio, nunca "N/A").
 - Copie informacoes EXATAMENTE como constam nos documentos, sem corrigir.
 - Use linguagem formal e juridicamente adequada.
+
+DADOS JA CONHECIDOS DO CARD (autoritativos):
+Quando a mensagem trouxer um bloco "[Dados do cliente/processo atual]", esses
+dados JA foram confirmados pelo escritorio. Para os campos pessoais/cadastrais
+— nome, endereco (rua, numero, bairro, cidade, estado, cep), telefone, e-mail,
+estado civil, nome da mae, data de nascimento, nacionalidade — USE o valor
+desse bloco como verdade e NAO tente reextrai-lo dos documentos. Extraia dos
+documentos apenas o que NAO estiver nesse bloco (dados do acidente, lesoes,
+afastamentos, etc.). Se um campo pessoal aparecer mascarado (ex.: "****1234")
+ou ausente no bloco, ai sim procure nos documentos.
+Atencao ao campo Profissao: se o bloco trouxer "Profissao", use esse valor
+EXATAMENTE como esta la para o campo <<profissao>> (profissao ATUAL) — nao
+substitua pelo que consta na CTPS. Ja o campo <<profissao_epoca>> (profissao
+na EPOCA do acidente) continua sendo extraido da CTPS/CNIS normalmente.
 
 AFASTAMENTOS (perguntas 24, 25, 28):
 Quando houver multiplos beneficios no arquivo "declaracao-de-beneficio", use o beneficio cujo ANO DE INICIO seja igual ou mais proximo (posterior) ao ANO da data do acidente para as perguntas 24 e 25. Os demais vao para a pergunta 28.
