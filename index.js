@@ -58,7 +58,9 @@ app.post("/convert", authCheck, (req, res) => {
   }
 
   converting = converting.then(() => new Promise((resolve) => {
-    libre.convert(req.body, "pdf", undefined, (err, result) => {
+    // fileName com extensão .docx: sem ela o soffice precisa adivinhar o
+    // formato pelo conteúdo e falha com "source file could not be loaded".
+    libre.convertWithOptions(req.body, "pdf", undefined, { fileName: "source.docx" }, (err, result) => {
       if (err) {
         console.error("Conversion error:", err);
         res.status(500).json({ error: "Conversion failed" });
