@@ -211,6 +211,24 @@ function tryDecodeTextBase64(base64) {
 
 // Converte um anexo (do payload) em um content block do Claude.
 // Retorna null se o formato não é suportado.
+// Conta as páginas de um PDF base64 sem lib externa: conta os objetos
+// "/Type /Page" (não /Pages) no binário; fallback pro /Count do nó raiz.
+// Retorna null se não der pra contar (PDF comprimido de forma exótica).
+function countPdfPages(base64) {
+  try {
+    const raw = Buffer.from(base64, "base64").toString("latin1");
+    const matches = raw.match(/\/Type\s*\/Page(?![a-zA-Z])/g);
+    if (matches?.length) return matches.length;
+    const counts = [...raw.matchAll(/\/Count\s+(\d+)/g)].map((m) => parseInt(m[1], 10));
+    return counts.length ? Math.max(...counts) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Limite da API do Claude: máximo de páginas de PDF somadas numa requisição.
+const CLAUDE_PDF_PAGE_LIMIT = 100;
+
 function buildContentBlockFromAttachment(att) {
   if (!att) return null;
   const fileName = att.name || "(sem nome)";
@@ -280,6 +298,10 @@ async function withRetry(fn, attempt = 1) {
 }
 
 app.post("/ai/chat", authCheck, async (req, res) => {
+  // Total de páginas dos PDFs anexados — usado na pré-validação do limite de
+  // 100 páginas e na mensagem de erro (fica fora do try pro catch enxergar).
+  let pdfPageTotal = 0;
+  let pdfFileCount = 0;
   try {
     const { messages, contextMessage, attachments, attachment } = req.body;
 
@@ -341,6 +363,14 @@ app.post("/ai/chat", authCheck, async (req, res) => {
 
         if (block) {
           console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → ${block.type} (${block.source?.media_type ?? "text"})`);
+          if (block.type === "document") {
+            pdfFileCount++;
+            const pages = countPdfPages(att.content);
+            if (pages) {
+              pdfPageTotal += pages;
+              console.log(`[AI CHAT] Anexo [${idx}] "${fileName}" → ${pages} página(s) de PDF`);
+            }
+          }
           lastContent.push(block);
           acceptedFiles++;
         } else {
@@ -352,6 +382,14 @@ app.post("/ai/chat", authCheck, async (req, res) => {
           rejectedFiles++;
         }
       }
+    }
+
+    // Pré-validação do limite de páginas do Claude: barra ANTES de gastar a
+    // chamada quando a contagem local já mostra que vai estourar.
+    if (pdfPageTotal > CLAUDE_PDF_PAGE_LIMIT) {
+      const msg = `O limite do Claude é ${CLAUDE_PDF_PAGE_LIMIT} páginas de PDF por análise — você mandou ${pdfPageTotal} páginas${pdfFileCount > 1 ? ` (somando ${pdfFileCount} PDFs)` : ""}. Divida o arquivo em partes menores e envie de novo.`;
+      console.log(`[AI CHAT] ❌ Bloqueado antes do envio: ${msg}`);
+      return res.status(400).json({ error: msg });
     }
 
     // Garante pelo menos um content block.
@@ -443,13 +481,26 @@ app.post("/ai/chat", authCheck, async (req, res) => {
   } catch (error) {
     console.error("\n[AI CHAT] ❌ ERRO:", error);
     const status = error?.status || 500;
+    // Mensagem crua da API (o SDK aninha o body em error.error.error.message).
+    const apiMsg = error?.error?.error?.message || error?.message || "";
     let message = "Erro ao processar mensagem com IA.";
-    if (status === 529 || status === 503) {
-      message = "Servidor sobrecarregado. Tente novamente em 1 minuto.";
+    if (/maximum of \d+ PDF pages/i.test(apiMsg)) {
+      message = `O limite do Claude é ${CLAUDE_PDF_PAGE_LIMIT} páginas de PDF por análise` +
+        (pdfPageTotal > 0 ? ` — você mandou ${pdfPageTotal} páginas${pdfFileCount > 1 ? ` (somando ${pdfFileCount} PDFs)` : ""}.` : " e os PDFs enviados passaram disso.") +
+        " Divida o arquivo em partes menores e envie de novo.";
+    } else if (/credit balance is too low/i.test(apiMsg)) {
+      message = "Os créditos da API do Claude acabaram. Recarregue o saldo no console da Anthropic para a IA voltar a funcionar.";
+    } else if (status === 529 || status === 503) {
+      message = "Servidor da IA sobrecarregado. Tente novamente em 1 minuto.";
     } else if (status === 429) {
       message = "Limite de requisições excedido. Aguarde alguns minutos.";
     } else if (status === 401) {
       message = "Chave da API do Claude inválida ou ausente.";
+    } else if (status === 413) {
+      message = "Os anexos são grandes demais para uma análise só. Envie menos arquivos por vez.";
+    } else if (status === 400 && apiMsg) {
+      // Outros 400 da API: repassa o motivo real em vez do erro genérico.
+      message = `A IA não conseguiu processar: ${apiMsg}`;
     }
 
     if (!res.headersSent) {
