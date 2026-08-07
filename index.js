@@ -477,6 +477,17 @@ app.post("/ai/chat", authCheck, async (req, res) => {
     console.log(`[AI CHAT] Stop reason: ${finalMessage.stop_reason ?? "?"}`);
     console.log("========================================\n");
 
+    // Sentinela de consumo no FIM do stream: o proxy do CRM (api/roteiro)
+    // recorta esta linha antes de repassar ao navegador e grava o gasto no
+    // log (Canto da IA). Sem isto o roteiro ficava invisível na conta.
+    res.write(`\n<<<AI_USAGE:${JSON.stringify({
+      model: finalMessage.model || CLAUDE_MODEL,
+      inputTokens: inputUncached,
+      outputTokens: usage.output_tokens ?? 0,
+      cacheReadTokens: cacheRead,
+      cacheWriteTokens: cacheWrite,
+    })}>>>`);
+
     res.end();
   } catch (error) {
     console.error("\n[AI CHAT] ❌ ERRO:", error);
@@ -649,6 +660,17 @@ ${content}`;
     }
     const cleaned = rawText.trim().replace(/^```json?\s*/i, "").replace(/\s*```$/i, "");
     const fields = JSON.parse(cleaned);
+
+    // Consumo junto da resposta (campo reservado _usage): o CRM grava no log
+    // para o Canto da IA — este endpoint também gasta tokens e era invisível.
+    const u = response.usage || {};
+    fields._usage = {
+      model: response.model || CLAUDE_MODEL,
+      inputTokens: u.input_tokens ?? 0,
+      outputTokens: u.output_tokens ?? 0,
+      cacheReadTokens: u.cache_read_input_tokens ?? 0,
+      cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
+    };
 
     res.json(fields);
   } catch (error) {
