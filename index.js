@@ -57,6 +57,18 @@ app.post("/convert", authCheck, (req, res) => {
     return res.status(400).json({ error: "No file provided" });
   }
 
+  // Assinatura ZIP (todo .docx válido começa com "PK\x03\x04") — loga pra
+  // conseguir diferenciar "arquivo corrompido" de "erro do soffice" no Railway.
+  const isZipSignature =
+    req.body.length >= 4 &&
+    req.body[0] === 0x50 &&
+    req.body[1] === 0x4b &&
+    req.body[2] === 0x03 &&
+    req.body[3] === 0x04;
+  console.log(
+    `[CONVERT] Recebido: ${req.body.length} bytes | Content-Type: ${req.headers["content-type"]} | assinatura ZIP válida: ${isZipSignature} | primeiros bytes: ${req.body.subarray(0, 8).toString("hex")}`
+  );
+
   converting = converting.then(() => new Promise((resolve) => {
     // fileName com extensão .docx: sem ela o soffice precisa adivinhar o
     // formato pelo conteúdo e falha com "source file could not be loaded".
