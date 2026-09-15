@@ -14,10 +14,14 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
 console.log("Configurações:", ANTHROPIC_API_KEY);
 
-const CLAUDE_MODEL = "claude-haiku-4-5";
+// 15/09/2026: roteiro/IA passa a rodar no Sonnet 5 (prompt maior, adaptive
+// thinking). Sobrescreva com CLAUDE_MODEL no Railway se quiser trocar.
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
 
 // Modelos que suportam adaptive thinking. Haiku 4.5 NÃO suporta.
 const ADAPTIVE_THINKING_MODELS = new Set([
+  "claude-opus-5",
+  "claude-sonnet-5",
   "claude-opus-4-8",
   "claude-opus-4-7",
   "claude-opus-4-6",
