@@ -56,30 +56,57 @@ function authCheck(req, res, next) {
 // "osl::Thread::create failed" em containers (Railway).
 let converting = Promise.resolve();
 
-app.post("/convert", authCheck, (req, res) => {
-  if (!req.body || req.body.length === 0) {
-    return res.status(400).json({ error: "No file provided" });
+// Um .docx é um ZIP: começa com "PK" e termina com o registro
+// End-Of-Central-Directory ("PK", nos últimos ~64KB). Sem o EOCD o
+// arquivo chegou truncado e o soffice falha com "source file could not be
+// loaded" — melhor recusar com 400 e um motivo legível do que gastar 3
+// tentativas do CRM num arquivo que nunca vai converter.
+function inspectDocx(buf) {
+  if (!buf || buf.length === 0) return { ok: false, reason: "arquivo vazio" };
+  const zipHeader =
+    buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04;
+  if (!zipHeader) {
+    return {
+      ok: false,
+      reason: `não é um ZIP/.docx (primeiros bytes: ${buf.subarray(0, 8).toString("hex")})`,
+    };
   }
+  const tail = buf.subarray(Math.max(0, buf.length - 65536 - 22));
+  const hasEocd = tail.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06])) !== -1;
+  if (!hasEocd) return { ok: false, reason: "ZIP truncado (sem End-Of-Central-Directory)" };
+  return { ok: true };
+}
 
-  // Assinatura ZIP (todo .docx válido começa com "PK\x03\x04") — loga pra
-  // conseguir diferenciar "arquivo corrompido" de "erro do soffice" no Railway.
-  const isZipSignature =
-    req.body.length >= 4 &&
-    req.body[0] === 0x50 &&
-    req.body[1] === 0x4b &&
-    req.body[2] === 0x03 &&
-    req.body[3] === 0x04;
+app.post("/convert", authCheck, (req, res) => {
+  const size = req.body ? req.body.length : 0;
+  const check = inspectDocx(req.body);
   console.log(
-    `[CONVERT] Recebido: ${req.body.length} bytes | Content-Type: ${req.headers["content-type"]} | assinatura ZIP válida: ${isZipSignature} | primeiros bytes: ${req.body.subarray(0, 8).toString("hex")}`
+    `[CONVERT] Recebido: ${size} bytes | Content-Type: ${req.headers["content-type"]} | docx válido: ${check.ok}${check.ok ? "" : ` (${check.reason})`}`
   );
+  if (!check.ok) {
+    return res.status(400).json({
+      error: `Arquivo .docx inválido: ${check.reason} (${size} bytes recebidos)`,
+      bytes: size,
+    });
+  }
 
   converting = converting.then(() => new Promise((resolve) => {
     // fileName com extensão .docx: sem ela o soffice precisa adivinhar o
     // formato pelo conteúdo e falha com "source file could not be loaded".
     libre.convertWithOptions(req.body, "pdf", undefined, { fileName: "source.docx" }, (err, result) => {
       if (err) {
-        console.error("Conversion error:", err);
-        res.status(500).json({ error: "Conversion failed" });
+        const msg = String(err && err.message ? err.message : err);
+        console.error(`[CONVERT] Erro no soffice (${size} bytes):`, msg);
+        // O ZIP passou na checagem mas o soffice não abriu: conteúdo interno
+        // corrompido (document.xml quebrado etc.). Repetir não resolve → 422.
+        if (/source file could not be loaded/i.test(msg)) {
+          res.status(422).json({
+            error: `LibreOffice não conseguiu abrir o .docx (${size} bytes) — conteúdo corrompido ou não é um documento Word`,
+            bytes: size,
+          });
+        } else {
+          res.status(500).json({ error: "Conversion failed", detail: msg.slice(0, 300) });
+        }
       } else {
         res.set("Content-Type", "application/pdf");
         res.send(result);
